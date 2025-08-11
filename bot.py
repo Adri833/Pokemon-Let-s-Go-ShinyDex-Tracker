@@ -3,7 +3,9 @@ import io
 from discord.ext import commands
 import json
 import os
+from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
+import aiohttp
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 PREFIX = "!"
@@ -176,7 +178,7 @@ def save_data():
 def generar_barra_pokemon(actual, total, archivo="barra.png"):
     ancho, alto = 500, 50
     porcentaje = actual / total
-    relleno = int((ancho - 4) * porcentaje)  # margen para el borde
+    relleno = int((ancho - 4) * porcentaje)
 
     # Crear imagen transparente
     img = Image.new("RGBA", (ancho, alto), (0, 0, 0, 0))
@@ -185,7 +187,7 @@ def generar_barra_pokemon(actual, total, archivo="barra.png"):
     # Fondo gris con bordes redondeados
     draw.rounded_rectangle([0, 0, ancho, alto], radius=15, fill=(200, 200, 200), outline=(0, 0, 0), width=3)
 
-    # Barra amarilla rellena
+    # Barra celeste rellena
     draw.rounded_rectangle([2, 2, relleno, alto - 2], radius=13, fill=(151, 240, 240))
 
     # Texto encima
@@ -207,43 +209,41 @@ def generar_barra_pokemon(actual, total, archivo="barra.png"):
 async def on_ready():
     print(f"Bot conectado como {bot.user}")
 
+
 @bot.command()
 async def capturar(ctx, *, pokemon: str):
     user_id = str(ctx.author.id)
     pokemon_lower = pokemon.lower()
-
-    # Buscar el pokemon en la lista para validar y obtener el id
     pokemon_obj = next((p for p in POKEMON_KANTO if p["name"] == pokemon_lower), None)
 
     if pokemon_obj is None:
-        await ctx.send(f"❌ Pokémon '{pokemon}' no válido. Asegúrate de escribir el nombre correctamente.")
+        await ctx.send(f"❌ Pokémon '{pokemon}' no válido.")
         return
 
     if user_id not in shinydex_data:
         shinydex_data[user_id] = []
 
-    # Comprobar si ya tiene el pokemon capturado, buscando por nombre
     if any(p["name"] == pokemon_lower for p in shinydex_data[user_id]):
-        await ctx.send(f"⚠️ Ya tienes {pokemon_obj['name'].capitalize()} shiny registrado.")
+        await ctx.send(f"⚠️ Ya tienes {pokemon_obj['name'].capitalize()} shiny.")
         return
 
-    # Guardar el pokemon con id y nombre
-    shinydex_data[user_id].append({"id": pokemon_obj["id"], "name": pokemon_obj["name"]})
-
-    # Ordenar la lista del usuario por id
+    fecha_actual = datetime.now().strftime("%d/%m/%Y %H:%M")
+    shinydex_data[user_id].append({
+        "id": pokemon_obj["id"],
+        "name": pokemon_obj["name"],
+        "date": fecha_actual
+    })
     shinydex_data[user_id].sort(key=lambda x: x["id"])
-
     save_data()
 
     actual = len(shinydex_data[user_id])
     generar_barra_pokemon(actual, TOTAL_SHINIES, "barra.png")
-
     gif_url = f"https://play.pokemonshowdown.com/sprites/ani-shiny/{pokemon_lower}.gif"
 
     file = discord.File("barra.png", filename="barra.png")
     embed = discord.Embed(
         title=f"{pokemon_obj['name'].capitalize()} shiny añadido",
-        description=f"¡Felicidades {ctx.author.mention}! ⭐",
+        description=f"¡Felicidades {ctx.author.mention}! 🌟",
         color=discord.Color.gold()
     )
     embed.set_image(url="attachment://barra.png")
@@ -251,62 +251,147 @@ async def capturar(ctx, *, pokemon: str):
 
     await ctx.send(file=file, embed=embed)
 
-def generar_tabla_imagen(pokemons, capturados_ids):
-    # Configuraciones
-    cols = 6  # columnas
-    rows = (len(pokemons) + cols - 1) // cols
-    cell_size = 120
-    width = cols * cell_size
-    height = rows * cell_size
+@bot.command()
+async def soltar(ctx, *, pokemon: str):
+    user_id = str(ctx.author.id)
+    pokemon_lower = pokemon.lower()
+    if user_id not in shinydex_data:
+        await ctx.send("❌ No tienes Pokémon registrados.")
+        return
 
-    # Crear imagen en blanco
-    img = Image.new("RGB", (width, height), color="white")
-    draw = ImageDraw.Draw(img)
+    lista = shinydex_data[user_id]
+    if not any(p["name"] == pokemon_lower for p in lista):
+        await ctx.send(f"❌ No tienes {pokemon_lower} shiny registrado.")
+        return
 
-    # Fuente para texto (puedes cambiar por path a una ttf si quieres)
-    try:
-        font = ImageFont.truetype("arial.ttf", 20)
-    except:
-        font = ImageFont.load_default()
+    shinydex_data[user_id] = [p for p in lista if p["name"] != pokemon_lower]
+    save_data()
+    await ctx.send(f"🗑️ {pokemon_lower.capitalize()} shiny eliminado de tu registro.")
 
-    estrella = "🌟"
+@bot.command()
+async def progreso(ctx):
+    user_id = str(ctx.author.id)
+    capturados = len(shinydex_data.get(user_id, []))
+    generar_barra_pokemon(capturados, TOTAL_SHINIES, "barra.png")
+    file = discord.File("barra.png", filename="barra.png")
+    embed = discord.Embed(
+        title=f"Progreso de {ctx.author.display_name}",
+        description=f"Has capturado **{capturados}** de **{TOTAL_SHINIES}** shinies.",
+        color=discord.Color.blue()
+    )
+    embed.set_image(url="attachment://barra.png")
+    await ctx.send(file=file, embed=embed)
 
-    for i, p in enumerate(pokemons):
-        x = (i % cols) * cell_size
-        y = (i // cols) * cell_size
+@bot.command()
+async def lista(ctx, filtro: str = None):
+    user_id = str(ctx.author.id)
+    capturados = shinydex_data.get(user_id, [])
+    if filtro == "faltan":
+        faltan = [p["name"].capitalize() for p in POKEMON_KANTO if p["id"] not in [c["id"] for c in capturados]]
+        await ctx.send(f"Pokémon que te faltan:\n" + ", ".join(faltan))
+    else:
+        tienes = [p["name"].capitalize() for p in capturados]
+        await ctx.send(f"Pokémon capturados:\n" + ", ".join(tienes) if tienes else "No tienes shinies registrados.")
 
-        # Si capturado: fondo azul
-        if p["id"] in capturados_ids:
-            draw.rectangle([x, y, x+cell_size, y+cell_size], fill=(100, 149, 237))  # cornflowerblue
+@bot.command()
+async def random(ctx):
+    user_id = str(ctx.author.id)
+    capturados_ids = {p["id"] for p in shinydex_data.get(user_id, [])}
+    pendientes = [p for p in POKEMON_KANTO if p["id"] not in capturados_ids]
+    if not pendientes:
+        await ctx.send("🎉 ¡Ya tienes todos los shinies!")
+        return
+    elegido = random.choice(pendientes)
+    await ctx.send(f"🎯 Tu objetivo aleatorio: **{elegido['name'].capitalize()}**")
 
-            # Estrella en esquina superior derecha
-            draw.text((x + cell_size - 25, y + 5), estrella, font=font, fill="yellow")
-        else:
-            # Fondo blanco
-            draw.rectangle([x, y, x+cell_size, y+cell_size], fill="white")
+@bot.command()
+async def stats(ctx):
+    user_id = str(ctx.author.id)
+    capturas = shinydex_data.get(user_id, [])
 
-        # Escribir el nombre centrado
-        nombre = p["name"].capitalize()
-        bbox = draw.textbbox((0, 0), nombre, font=font)
-        w = bbox[2] - bbox[0]
-        h = bbox[3] - bbox[1]
-        text_x = x + (cell_size - w) // 2
-        text_y = y + (cell_size - h) // 2
-        text_color = "white" if p["id"] in capturados_ids else "black"
-        draw.text((text_x, text_y), nombre, font=font, fill=text_color)
+    if not capturas:
+        await ctx.send("❌ No tienes shinies registrados.")
+        return
 
-    return img
+    total_capturados = len(capturas)
+    
+    total_faltantes = TOTAL_SHINIES - total_capturados
+
+    ultima = max(capturas, key=lambda x: datetime.strptime(x["date"], "%d/%m/%Y %H:%M"))
+    fecha_ultima = datetime.strptime(ultima["date"], "%d/%m/%Y %H:%M")
+    dias = (datetime.now() - fecha_ultima).days
+
+    await ctx.send(
+        f"📊 **Estadísticas de {ctx.author.display_name}**\n"
+        f"⭐ **Progreso total:** {total_capturados}/{TOTAL_SHINIES} shinies capturados ({total_faltantes} restantes)\n"
+        f"➡️ **Último shiny:** {ultima['name'].capitalize()} ({ultima['date']})\n"
+        f"⏳ **Días desde la última captura:** {dias}"
+    )
+
+@bot.command()
+async def historial(ctx):
+    user_id = str(ctx.author.id)
+    capturas = shinydex_data.get(user_id, [])
+    if not capturas:
+        await ctx.send("❌ No tienes shinies registrados.")
+        return
+    ultimos = sorted(capturas, key=lambda x: x["date"], reverse=True)[:10]
+    mensaje = "\n".join([f"º🌟 {p['name'].capitalize()} — {p['date']}" for p in ultimos])
+    await ctx.send(f"📝 Últimas capturas:\n{mensaje}")
 
 @bot.command()
 async def shinydex(ctx):
     user_id = str(ctx.author.id)
-    capturados = shinydex_data.get(user_id, [])
-    capturados_ids = {p["id"] for p in capturados}
+    capturados_ids = {p["id"] for p in shinydex_data.get(user_id, [])}
 
-    img = generar_tabla_imagen(POKEMON_KANTO, capturados_ids)
+    cols = 15
+    cell_size = 160
+    icon_size = (130, 130)
+    margen_x = (cell_size - icon_size[0]) // 2
+    margen_y = (cell_size - icon_size[1]) // 2
+
+    rows = (len(POKEMON_KANTO) + cols - 1) // cols
+    img_width = cols * cell_size
+    img_height = rows * cell_size
+
+    img_base = Image.new("RGB", (img_width, img_height), color="white")
+    draw = ImageDraw.Draw(img_base)
+    
+    try:
+        font = ImageFont.truetype("arial.ttf", 16)
+    except:
+        font = ImageFont.load_default()
+
+    async with aiohttp.ClientSession() as session:
+        for idx, pkm in enumerate(POKEMON_KANTO):
+            x = (idx % cols) * cell_size
+            y = (idx // cols) * cell_size
+            
+            # Descargar imagen del Pokémon
+            if pkm["id"] in capturados_ids:
+                # Si está capturado, usar la URL shiny
+                url = f"https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/shiny/{pkm['id']}.png"
+            else:
+                # Si no está capturado, usar la URL normal
+                url = f"https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/{pkm['id']}.png"
+
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    datos = await resp.read()
+                    img = Image.open(io.BytesIO(datos)).convert("RGBA")
+                    img = img.resize(icon_size)
+
+                    if pkm["id"] not in capturados_ids:
+                        # Aplicar filtro de blanco y negro para los no capturados
+                        img = img.convert("L").convert("RGBA")
+                    
+                    # Pegar la imagen en el lienzo
+                    img_base.paste(img, (x + margen_x, y + margen_y), img)
+                else:
+                    print(f"No se pudo descargar la imagen de {pkm['name']}")
 
     with io.BytesIO() as image_binary:
-        img.save(image_binary, "PNG")
+        img_base.save(image_binary, "PNG")
         image_binary.seek(0)
         await ctx.send(file=discord.File(fp=image_binary, filename="shiny_tabla.png"))
 
