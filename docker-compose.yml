@@ -1,0 +1,12 @@
+version: "3.8"
+
+services:
+  shinydex-bot:
+    build: .
+    container_name: shinydex-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - TZ=Europe/Madrid
+    volumes:
+      - ./shinydex.json:/app/shinydex.json
